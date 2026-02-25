@@ -8,6 +8,7 @@
 #ifndef MeanValueCoordController_hpp
 #define MeanValueCoordController_hpp
 
+#include <Eigen/Core>
 #include <igl/readPLY.h>
 #include <cmath>
 
@@ -31,6 +32,7 @@ public:
     void ComputeMVWeights();
     void SetDeformedCage(const MatrixXd& vertices_cage_deformed);
     MatrixXd MVInterpolate();
+    const MatrixXd& GetWeights() const;
     
 };
 

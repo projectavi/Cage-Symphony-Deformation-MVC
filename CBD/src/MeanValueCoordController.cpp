@@ -6,6 +6,7 @@
 //
 
 #include "MeanValueCoordController.hpp"
+#include <Eigen/LU>
 
 static const double EPSILON_PLANAR_RATIO = 0.000001;
 
@@ -149,5 +150,7 @@ MatrixXd MeanValueCoordController::MVInterpolate(){
     return mV_weights * V_cage_deformed;
 }
 
-
+const MatrixXd& MeanValueCoordController::GetWeights() const {
+    return mV_weights;
+}
 

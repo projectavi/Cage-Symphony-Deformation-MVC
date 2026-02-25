@@ -166,7 +166,7 @@ void CageGenerator::ComputePrincipalDirectionsBoundingBox(MatrixXd &bb_vertices,
         }
     }
     
-    n_vox[j_max] = (int)(sqrt(sparseness_ * double(num_vertices_mesh_) / 6.)); // Chuhua Xian. https://www.cse.wustl.edu/~taoju/research/meanvalue.pdf
+    n_vox[j_max] = max(1, (int)(sqrt(sparseness_ * double(num_vertices_mesh_) / 6.))); // Chuhua Xian. https://www.cse.wustl.edu/~taoju/research/meanvalue.pdf
     cout << "n_vox = " << n_vox[j_max] << endl;
     res_vox[j_max] = (bbBox_ptMax(j_max) - bbBox_ptMin(j_max)) / n_vox[j_max];
     for (int j = 0; j < 3; j++){
@@ -761,7 +761,6 @@ MatrixXd CageGenerator::GetSmoothCage() {
     }
     return result;
 }
-
 
 
 

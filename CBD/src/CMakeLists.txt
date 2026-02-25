@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.5)
 project(3DA_project_CageBasedDef)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -15,7 +15,8 @@ find_package(LIBIGL REQUIRED QUIET)
 set(SRC_FILES ${PROJECT_SOURCE_DIR}/main.cpp
               MeanValueCoordController.hpp MeanValueCoordController.cpp
 MeshProcessor.hpp MeshProcessor.cpp CageGenerator.hpp CageGenerator.cpp
-DeformCageViewerPlugin.hpp)
+DeformCageViewerPlugin.hpp
+StructuralAffinityController.hpp StructuralAffinityController.cpp)
               
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
