@@ -13,6 +13,12 @@ using namespace Eigen;
 using namespace std;
 
 class StructuralAffinityController {
+public:
+    enum class AffinityMode {
+        MinWeightIntersection = 0,
+        AnalyticalProjection = 1
+    };
+
 private:
     SparseMatrix<double, RowMajor> affinity_;
     int num_vertices_;
@@ -21,7 +27,9 @@ private:
 
 public:
     StructuralAffinityController();
-    void BuildFromWeights(const MatrixXd& lower_to_upper_weights, double epsilon);
+    void BuildFromWeights(const MatrixXd& lower_to_upper_weights,
+                          double epsilon,
+                          AffinityMode mode = AffinityMode::MinWeightIntersection);
     void ApplyDeltasWithPinnedSources(const vector<int>& source_ids,
                                       const vector<Vector3d>& source_deltas,
                                       const MatrixXd& base_cage,

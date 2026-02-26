@@ -8,7 +8,7 @@
 #include <cmath>
 #include <iostream>
 
-static const double AFFINITY_DENOM_EPSILON_ = 1e-12;
+static const double kAffinityNumericalEpsilon = 1e-12;
 
 StructuralAffinityController::StructuralAffinityController() {
     num_vertices_ = 0;
@@ -17,7 +17,13 @@ StructuralAffinityController::StructuralAffinityController() {
 }
 
 void StructuralAffinityController::BuildFromWeights(const MatrixXd& lower_to_upper_weights,
-                                                    double epsilon) {
+                                                    double epsilon,
+                                                    AffinityMode mode) {
+    // Precompute sparse affinity C from lower->upper weights.
+    // Min-weight mode:
+    //   C(i,j) = sum_k min(w_i_k, w_j_k) / sum_k w_i_k
+    // Analytical mode:
+    //   C(i,j) = sum_k (w_i_k * w_j_k) / sum_k (w_i_k^2)
     num_vertices_ = lower_to_upper_weights.rows();
     epsilon_ = max(0., epsilon);
     ready_ = false;
@@ -30,13 +36,19 @@ void StructuralAffinityController::BuildFromWeights(const MatrixXd& lower_to_upp
         return;
     }
 
-    const int num_upper_vertices = lower_to_upper_weights.cols();
-    vector<VectorXd> positive_weights_rows(num_vertices_);
+    vector<VectorXd> source_weights_rows(num_vertices_);
     VectorXd denominators = VectorXd::Zero(num_vertices_);
 
+    // Min-weight mode uses non-negative weights to preserve conservative overlap semantics.
+    // Analytical mode uses raw weights directly in dot products.
     for (int i = 0; i < num_vertices_; ++i) {
-        positive_weights_rows[i] = lower_to_upper_weights.row(i).cwiseMax(0.0);
-        denominators(i) = positive_weights_rows[i].sum();
+        if (mode == AffinityMode::MinWeightIntersection) {
+            source_weights_rows[i] = lower_to_upper_weights.row(i).cwiseMax(0.0);
+            denominators(i) = source_weights_rows[i].sum();
+        } else {
+            source_weights_rows[i] = lower_to_upper_weights.row(i);
+            denominators(i) = source_weights_rows[i].squaredNorm();
+        }
     }
 
     vector<Triplet<double>> triplets;
@@ -46,28 +58,32 @@ void StructuralAffinityController::BuildFromWeights(const MatrixXd& lower_to_upp
         // The source vertex always follows 100% of user drag.
         triplets.push_back(Triplet<double>(i, i, 1.0));
 
-        if (denominators(i) <= AFFINITY_DENOM_EPSILON_) {
+        if (denominators(i) <= kAffinityNumericalEpsilon) {
             continue;
         }
 
-        const VectorXd& wi = positive_weights_rows[i];
+        const VectorXd& wi = source_weights_rows[i];
 
         for (int j = 0; j < num_vertices_; ++j) {
             if (j == i) {
                 continue;
             }
 
-            const VectorXd& wj = positive_weights_rows[j];
-            double numerator = 0.;
-
-            for (int k = 0; k < num_upper_vertices; ++k) {
-                numerator += min(wi(k), wj(k));
+            const VectorXd& wj = source_weights_rows[j];
+            double numerator = 0.0;
+            if (mode == AffinityMode::MinWeightIntersection) {
+                numerator = wi.cwiseMin(wj).sum();
+            } else {
+                numerator = wi.dot(wj);
             }
 
             double cij = numerator / denominators(i);
-            cij = min(1.0, max(0.0, cij));
+            if (mode == AffinityMode::MinWeightIntersection) {
+                cij = min(1.0, max(0.0, cij));
+            }
 
-            if (cij >= epsilon_ && cij > AFFINITY_DENOM_EPSILON_) {
+            // Keep entries above threshold; drop tiny numerical noise.
+            if (cij >= epsilon_ && cij > kAffinityNumericalEpsilon) {
                 triplets.push_back(Triplet<double>(i, j, cij));
             }
         }
@@ -92,6 +108,7 @@ void StructuralAffinityController::ApplyDeltasWithPinnedSources(
         return;
     }
 
+    // 1) Additive propagation from all selected sources.
     MatrixXd accumulated_delta = MatrixXd::Zero(num_vertices_, 3);
     const int num_sources = min((int)source_ids.size(), (int)source_deltas.size());
 
@@ -111,7 +128,7 @@ void StructuralAffinityController::ApplyDeltasWithPinnedSources(
     const double clamped_alpha = min(1.0, max(0.0, neighbor_alpha));
     accumulated_delta *= clamped_alpha;
 
-    // Hard-pin source handles to exact user drag after additive accumulation.
+    // 2) Hard-pin source handles to exact user drag after accumulation.
     for (int source_i = 0; source_i < num_sources; ++source_i) {
         const int source_id = source_ids[source_i];
         if (source_id < 0 || source_id >= num_vertices_) {
@@ -120,6 +137,7 @@ void StructuralAffinityController::ApplyDeltasWithPinnedSources(
         accumulated_delta.row(source_id) = source_deltas[source_i];
     }
 
+    // 3) Apply the final delta field to the base cage.
     out_cage += accumulated_delta;
 }
 

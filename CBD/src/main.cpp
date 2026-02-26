@@ -50,6 +50,13 @@ float upper_cage_sparseness_ratio = 0.6; // Upper cage is generated from lower c
 bool use_upper_convex_fallback = false;
 int upper_convex_target_vertices = 8;
 
+struct AffinityEpsilonSearchResult {
+    double epsilon;
+    double density;
+    int nnz;
+};
+
+// Shared CLI parsing helpers.
 static bool ParseBoolArg(const string& text, bool& value) {
     string lowered = text;
     transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
@@ -97,6 +104,7 @@ static double Clamp01(const double value) {
     return min(1.0, max(0.0, value));
 }
 
+// Command-line reference shown by `--help`.
 static void PrintUsage(const char* exe_name) {
     cout << "Usage: " << exe_name << " [options]" << endl;
     cout << "  --mesh <path>                    Base mesh file path (.obj/.ply/.off)" << endl;
@@ -110,55 +118,56 @@ static void PrintUsage(const char* exe_name) {
     cout << "  --affinity-epsilon <float>       Epsilon threshold for affinity matrix (default: 1e-4)" << endl;
     cout << "  --affinity-target-density <f>    Target density in [0,1], overrides --affinity-epsilon by searching epsilon" << endl;
     cout << "  --affinity-target-sparsity <f>   Deprecated alias of --affinity-target-density" << endl;
+    cout << "  --analytical                     Use analytical affinity (dot/squared-norm) instead of min-weight" << endl;
     cout << "  --affinity-alpha <float>         Scale [0,1] for non-source propagated cage motion (default: 1.0)" << endl;
     cout << "  --help                           Show this message" << endl;
 }
 
-static double FindAffinityEpsilonForTargetDensity(const MatrixXd& lower_to_upper_weights,
-                                                  const double target_density,
-                                                  const int max_iterations,
-                                                  const double tolerance,
-                                                  double& out_density,
-                                                  int& out_nnz) {
-    const double clamped_target = Clamp01(target_density);
+static AffinityEpsilonSearchResult FindAffinityEpsilonForTargetDensity(
+    const MatrixXd& lower_to_upper_weights,
+    const double target_density,
+    const int max_iterations,
+    const double tolerance,
+    const StructuralAffinityController::AffinityMode affinity_mode) {
+    // Larger epsilon prunes more entries, so matrix density decreases monotonically.
+    // This enables binary search on epsilon for a requested density target.
+    const double clamped_target_density = Clamp01(target_density);
     StructuralAffinityController tmp_controller;
 
-    double lower = 0.0;
-    double upper = 1.0;
-    double best_epsilon = 0.0;
+    double lower_epsilon = 0.0;
+    double upper_epsilon = 1.0;
+    AffinityEpsilonSearchResult best_result = {0.0, 0.0, 0};
     double best_error = numeric_limits<double>::infinity();
-    out_density = 0.0;
-    out_nnz = 0;
 
     auto Evaluate = [&](const double epsilon) -> double {
-        tmp_controller.BuildFromWeights(lower_to_upper_weights, epsilon);
+        tmp_controller.BuildFromWeights(lower_to_upper_weights, epsilon, affinity_mode);
         const double density = tmp_controller.GetDensity();
-        const double error = abs(density - clamped_target);
+        const double error = abs(density - clamped_target_density);
         if (error < best_error) {
             best_error = error;
-            best_epsilon = epsilon;
-            out_density = density;
-            out_nnz = tmp_controller.GetNumNonZeros();
+            best_result.epsilon = epsilon;
+            best_result.density = density;
+            best_result.nnz = tmp_controller.GetNumNonZeros();
         }
         return density;
     };
 
-    Evaluate(lower);
-    Evaluate(upper);
+    Evaluate(lower_epsilon);
+    Evaluate(upper_epsilon);
     for (int iter = 0; iter < max_iterations; ++iter) {
-        const double epsilon = 0.5 * (lower + upper);
+        const double epsilon = 0.5 * (lower_epsilon + upper_epsilon);
         const double density = Evaluate(epsilon);
-        if (abs(density - clamped_target) <= tolerance) {
+        if (abs(density - clamped_target_density) <= tolerance) {
             break;
         }
-        if (density > clamped_target) {
-            lower = epsilon;
+        if (density > clamped_target_density) {
+            lower_epsilon = epsilon;
         } else {
-            upper = epsilon;
+            upper_epsilon = epsilon;
         }
     }
 
-    return best_epsilon;
+    return best_result;
 }
 
 static void BuildConvexBoundingCage(const MatrixXd& V_source,
@@ -306,10 +315,14 @@ static void BuildConvexBoundingCage(const MatrixXd& V_source,
 
 int main(int argc, char *argv[])
 {
+    // Affinity controls. By default epsilon is explicit; target-density mode overrides it.
     double affinity_epsilon = 1e-4;
-    double affinity_target_density = -1.0;
+    double affinity_target_density = 0.0;
+    bool use_affinity_target_density = false;
+    bool use_analytical_affinity = false;
     double affinity_neighbor_alpha = 1.0;
 
+    // Parse CLI arguments.
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
         if (arg == "--help") {
@@ -370,6 +383,9 @@ int main(int argc, char *argv[])
                 return 1;
             }
             affinity_target_density = Clamp01(parsed);
+            use_affinity_target_density = true;
+        } else if (arg == "--analytical") {
+            use_analytical_affinity = true;
         } else if (arg == "--affinity-alpha" && i + 1 < argc) {
             double parsed = 0.;
             if (!ParseDoubleArg(argv[++i], parsed)) {
@@ -395,7 +411,8 @@ int main(int argc, char *argv[])
     cout << "  upper_convex_fallback = " << (use_upper_convex_fallback ? "true" : "false") << endl;
     cout << "  upper_convex_vertices = " << upper_convex_target_vertices << endl;
     cout << "  affinity_epsilon = " << affinity_epsilon << endl;
-    if (affinity_target_density >= 0.0) {
+    cout << "  affinity_mode = " << (use_analytical_affinity ? "analytical" : "min-weight") << endl;
+    if (use_affinity_target_density) {
         cout << "  affinity_target_density = " << affinity_target_density
              << " (epsilon search enabled)" << endl;
     } else {
@@ -579,32 +596,37 @@ int main(int argc, char *argv[])
          << (clock() - start) / (double) CLOCKS_PER_SEC << endl;
 
     StructuralAffinityController structural_affinity_controller;
+    const auto affinity_mode = use_analytical_affinity
+        ? StructuralAffinityController::AffinityMode::AnalyticalProjection
+        : StructuralAffinityController::AffinityMode::MinWeightIntersection;
     const double target_density_search_tolerance = 1e-3;
     const int target_density_search_max_iterations = 24;
     double effective_affinity_epsilon = affinity_epsilon;
-    double searched_density = 0.0;
-    int searched_nnz = 0;
+    AffinityEpsilonSearchResult search_result = {effective_affinity_epsilon, 0.0, 0};
 
-    if (affinity_target_density >= 0.0) {
+    if (use_affinity_target_density) {
+        // Optional epsilon search: match requested density as closely as possible.
         start = clock();
-        effective_affinity_epsilon = FindAffinityEpsilonForTargetDensity(
+        search_result = FindAffinityEpsilonForTargetDensity(
             lower_to_upper_controller.GetWeights(),
             affinity_target_density,
             target_density_search_max_iterations,
             target_density_search_tolerance,
-            searched_density,
-            searched_nnz);
+            affinity_mode);
+        effective_affinity_epsilon = search_result.epsilon;
         cout << "Affinity epsilon search (target density = " << affinity_target_density
              << ") found epsilon = " << effective_affinity_epsilon
-             << ", density = " << searched_density
-             << ", nnz = " << searched_nnz
+             << ", density = " << search_result.density
+             << ", nnz = " << search_result.nnz
              << " in " << (clock() - start) / (double) CLOCKS_PER_SEC << " s" << endl;
     }
 
     start = clock();
+    // Build sparse structural-affinity matrix with the selected epsilon.
     structural_affinity_controller.BuildFromWeights(
         lower_to_upper_controller.GetWeights(),
-        effective_affinity_epsilon);
+        effective_affinity_epsilon,
+        affinity_mode);
     cout << "Time to precompute structural affinity : "
          << (clock() - start) / (double) CLOCKS_PER_SEC << endl;
     cout << "Affinity matrix non-zeros: " << structural_affinity_controller.GetNumNonZeros()
@@ -666,8 +688,10 @@ int main(int argc, char *argv[])
         if (ImGui::Checkbox("Structural Affinity Drag", &use_structural_affinity_drag)) {
             def_cage_plugin.SetUseStructuralAffinity(use_structural_affinity_drag);
         }
+        // Runtime diagnostics for the active affinity configuration.
+        ImGui::Text("Affinity mode = %s", use_analytical_affinity ? "analytical" : "min-weight");
         ImGui::Text("Affinity epsilon (effective) = %.1e", effective_affinity_epsilon);
-        if (affinity_target_density >= 0.0) {
+        if (use_affinity_target_density) {
             ImGui::Text("Affinity target density = %.6f", affinity_target_density);
         }
         ImGui::Text("Affinity alpha = %.3f", affinity_neighbor_alpha);
